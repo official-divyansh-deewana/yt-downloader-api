@@ -1,110 +1,97 @@
-const axios = require('axios');
+export default async function handler(req, res) {
+    // CORS Headers
+    const headers = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Content-Type': 'application/json'
+    };
 
-module.exports = async (req, res) => {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    // Handling ?=url logic
-    const fullQuery = url.search.substring(1); 
-    let youtubeUrl = fullQuery.startsWith('=') ? fullQuery.substring(1) : url.searchParams.get('url');
-
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Content-Type', 'application/json');
-
-    if (!youtubeUrl) {
-        return res.status(400).json({
-            success: false,
-            error: "YouTube link required! Example: ?=https://youtu.be/xxx",
-            developer: { Owner: "Divyansh Deewana", TG: "@tera_paglu" }
-        });
+    if (req.method === 'OPTIONS') {
+        return new Response(null, { status: 204, headers });
     }
 
-    // Cleaning YouTube URL
-    youtubeUrl = decodeURIComponent(youtubeUrl);
+    // URL se ?=https://... wala part nikalna
+    const urlObj = new URL(req.url, `https://${req.headers.get('host')}`);
+    const fullQuery = urlObj.search.substring(1);
+    let youtubeUrl = fullQuery.startsWith('=') ? fullQuery.substring(1) : urlObj.searchParams.get('url');
+
+    if (!youtubeUrl) {
+        return new Response(JSON.stringify({
+            success: false,
+            message: "YouTube link required! Example: ?=https://youtu.be/xxxx",
+            apiOwner: "Divyansh Deewana"
+        }), { status: 400, headers });
+    }
 
     try {
-        // Step 1: Extract Video ID
+        // Step 1: Extract Video ID safely
         let videoId = "";
-        if (youtubeUrl.includes('youtu.be/')) {
-            videoId = youtubeUrl.split('youtu.be/')[1].split(/[?#&]/)[0];
-        } else if (youtubeUrl.includes('v=')) {
-            videoId = youtubeUrl.split('v=')[1].split('&')[0];
-        } else if (youtubeUrl.includes('shorts/')) {
-            videoId = youtubeUrl.split('shorts/')[1].split(/[?#&]/)[0];
-        }
+        const regExp = /^.*((youtu.be\/)|(v\/)|(\/u\/\w\/)|(embed\/)|(watch\?))\??v?=?([^#&?]*).*/;
+        const match = youtubeUrl.match(regExp);
+        videoId = (match && match[7].length == 11) ? match[7] : "";
 
-        // Step 2: Hit the Downloader Backend
-        const apiResponse = await axios.post('https://app.ytdown.to/proxy.php', 
-            new URLSearchParams({ url: youtubeUrl }).toString(), 
-            {
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'X-Requested-With': 'XMLHttpRequest',
-                    'Referer': 'https://app.ytdown.to/'
-                }
-            }
-        );
+        // Step 2: Hit the Downloader Proxy
+        const apiResponse = await fetch('https://app.ytdown.to/proxy.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Referer': 'https://app.ytdown.to/'
+            },
+            body: new URLSearchParams({ url: youtubeUrl })
+        });
 
-        const data = apiResponse.data;
+        const data = await apiResponse.json();
 
         if (!data || !data.api || !data.api.mediaItems) {
-            throw new Error("Target site did not return media items. It might be rate-limited.");
+            return new Response(JSON.stringify({
+                success: false,
+                message: "No media items found for this video.",
+                apiOwner: "Divyansh Deewana"
+            }), { status: 200, headers });
         }
 
-        const videoFormats = [];
-        const audioFormats = [];
+        const videoLinks = [];
+        const audioLinks = [];
 
-        // Step 3: Process Media Items
-        for (const item of data.api.mediaItems) {
-            // Quality mapping
-            let quality = item.mediaQuality || (item.mediaRes ? item.mediaRes.split('x')[1] + 'p' : '360p');
-            
-            // Link Polling (Ytdown requires hitting the mediaUrl to get the final link)
-            let finalLink = item.mediaUrl;
-            
-            // Cleaning download links
-            if (finalLink && !finalLink.startsWith('http')) {
-                finalLink = 'https:' + finalLink;
-            }
-
+        // Step 3: Parse Links
+        data.api.mediaItems.forEach(item => {
             const format = {
-                quality: quality,
+                quality: item.mediaQuality || (item.mediaRes ? item.mediaRes.split('x')[1] + 'p' : 'Unknown'),
                 extension: item.mediaExtension || (item.type === 'Audio' ? 'mp3' : 'mp4'),
-                size: item.mediaFileSize || 'Unknown',
-                downloadUrl: finalLink
+                size: item.mediaFileSize || 'N/A',
+                downloadUrl: item.mediaUrl.startsWith('http') ? item.mediaUrl : 'https:' + item.mediaUrl
             };
 
             if (item.type === 'Audio') {
-                audioFormats.push(format);
+                audioLinks.push(format);
             } else {
-                videoFormats.push(format);
+                videoLinks.push(format);
             }
-        }
+        });
 
-        // Final Response
-        return res.status(200).json({
+        // Step 4: Final Success Response
+        return new Response(JSON.stringify({
             success: true,
-            developer: {
-                Owner: "Divyansh Deewana",
-                TG: "@tera_paglu"
-            },
-            video: {
+            video_info: {
                 title: data.api.title || "YouTube Video",
-                thumbnail: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
-                duration: data.api.mediaItems[0]?.mediaDuration || "Unknown",
+                thumbnail: videoId ? `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg` : "",
                 videoId: videoId
             },
             links: {
-                video: videoFormats,
-                audio: audioFormats
-            }
-        });
+                video: videoLinks,
+                audio: audioLinks
+            },
+            developer: "Divyansh Deewana",
+            channel: "https://t.me/tera_paglu"
+        }), { status: 200, headers });
 
-    } catch (err) {
-        return res.status(500).json({
+    } catch (error) {
+        return new Response(JSON.stringify({
             success: false,
-            message: "Failed to fetch download links. The backend provider might be down.",
-            error: err.message,
-            developer: { Owner: "Divyansh Deewana" }
-        });
+            error: "System busy or IP Blocked by provider.",
+            debug: error.message
+        }), { status: 500, headers });
     }
-};
+}
