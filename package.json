@@ -1,5 +1,7 @@
 {
-  "name": "yt-downloader-vercel",
+  "name": "yt-downloader-api",
   "version": "1.0.0",
-  "dependencies": {}
+  "dependencies": {
+    "axios": "^1.6.0"
+  }
 }
