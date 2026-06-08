@@ -1,3 +1,5 @@
+const axios = require('axios');
+
 module.exports = async (req, res) => {
     // 1. Headers Setup
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -8,55 +10,57 @@ module.exports = async (req, res) => {
         return res.status(200).end();
     }
 
-    // 2. Advanced Query Parsing (Fix for ?= format)
-    // req.url typical format: "/?=https://youtu.be/xxx"
-    const rawUrl = req.url || "";
+    // 2. ULTIMATE URL EXTRACTION (Fix for Vercel/Android)
     let youtubeUrl = "";
-
-    if (rawUrl.includes('?=')) {
-        // Ham 'index' ka use karenge taaki standard parsing fail na ho
-        youtubeUrl = rawUrl.substring(rawUrl.indexOf('=') + 1);
-    } else if (rawUrl.includes('?url=')) {
-        youtubeUrl = rawUrl.split('?url=')[1];
+    
+    // Sabse pehle pura URL nikalna (Original URL headers se)
+    const fullUrl = req.headers['x-now-route-matches'] || req.url || "";
+    
+    // Check Case 1: /?=https://...
+    if (fullUrl.includes('?=')) {
+        youtubeUrl = fullUrl.substring(fullUrl.indexOf('?=') + 2);
+    } 
+    // Check Case 2: Standard Query ?url=...
+    else if (fullUrl.includes('?url=')) {
+        youtubeUrl = fullUrl.split('?url=')[1];
+    }
+    // Check Case 3: Vercel req.query (Empty key)
+    else if (req.query && req.query['']) {
+        youtubeUrl = req.query[''];
     }
 
-    // Agar url abhi bhi khali hai (Try searching in searchParams)
-    if (!youtubeUrl) {
-        try {
-            const parsedUrl = new URL(rawUrl, `https://${req.headers.host}`);
-            youtubeUrl = parsedUrl.searchParams.get('url') || "";
-        } catch (e) {
-            youtubeUrl = "";
-        }
-    }
-
-    // Decoding URL (Important for special characters)
+    // Cleaning and Decoding
     youtubeUrl = decodeURIComponent(youtubeUrl).trim();
 
+    // Debugging (Taaki aapko dikhe ki server ko kya mila)
     if (!youtubeUrl || !youtubeUrl.startsWith('http')) {
         return res.status(400).json({
             success: false,
-            message: "YouTube link required! Use format: /?=https://youtu.be/xxxx",
-            debug_received_url: youtubeUrl || "none",
+            message: "YouTube link required!",
+            format_needed: "/?=https://www.youtube.com/watch?v=xxxx",
+            received_url_debug: youtubeUrl || "empty",
+            server_path_debug: fullUrl,
             developer: "Divyansh Deewana"
         });
     }
 
     try {
-        // 3. Hitting the Downloader Proxy
-        const apiResponse = await fetch('https://app.ytdown.to/proxy.php', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                'X-Requested-With': 'XMLHttpRequest',
-                'Referer': 'https://app.ytdown.to/',
-                'Origin': 'https://app.ytdown.to'
-            },
-            body: new URLSearchParams({ url: youtubeUrl })
-        });
+        // 3. Hitting the Proxy Backend
+        const apiResponse = await axios.post('https://app.ytdown.to/proxy.php', 
+            new URLSearchParams({ url: youtubeUrl }).toString(), 
+            {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Referer': 'https://app.ytdown.to/',
+                    'Origin': 'https://app.ytdown.to'
+                },
+                timeout: 15000 // 15 seconds timeout
+            }
+        );
 
-        const data = await apiResponse.json();
+        const data = apiResponse.data;
 
         if (data && data.api && data.api.mediaItems) {
             const videoLinks = [];
@@ -78,7 +82,7 @@ module.exports = async (req, res) => {
                 }
             });
 
-            // 4. Extract Video ID for Thumbnail
+            // Extract Video ID for Thumbnail
             const videoIdMatch = youtubeUrl.match(/(?:youtu\.be\/|youtube\.com(?:\/embed\/|\/v\/|\/watch\?v=|\/user\/\S+|\/ytscreeningroom\?v=|\/sandaymq\?v=))([\w-]{11})/);
             const videoId = videoIdMatch ? videoIdMatch[1] : "";
 
@@ -87,7 +91,6 @@ module.exports = async (req, res) => {
                 video_info: {
                     title: data.api.title || "YouTube Video",
                     thumbnail: videoId ? `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg` : "",
-                    videoId: videoId,
                     duration: data.api.mediaItems[0]?.mediaDuration || "Unknown"
                 },
                 links: {
@@ -100,7 +103,7 @@ module.exports = async (req, res) => {
         } else {
             return res.status(404).json({
                 success: false,
-                message: "No download links found. Video may be restricted.",
+                message: "Download links not found for this video.",
                 apiOwner: "Divyansh Deewana"
             });
         }
@@ -108,7 +111,7 @@ module.exports = async (req, res) => {
     } catch (error) {
         return res.status(500).json({
             success: false,
-            error: "Backend Error",
+            error: "Backend Fetch Error",
             message: error.message
         });
     }
